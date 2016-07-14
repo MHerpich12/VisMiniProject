@@ -1,0 +1,293 @@
+---
+title: 95-868 Mini-Project
+author: Matthew Herpich (mherpich)
+output: html_document
+---
+
+```{r fig.width=6, fig.height=4, dpi=70, echo=FALSE, fig.align='center'}
+# initialize libraries of interest
+options(warn = -1)
+suppressPackageStartupMessages(library(ggplot2))
+library(plyr)
+library(splines)
+suppressPackageStartupMessages(library(gam))
+library(broom)
+library(car)
+
+# load nlschools dataset
+data(nlschools, package="MASS")
+```
+
+## Introduction
+### Overview
+The purpose of this assignment was to explore the R data set `nlschools` (in the `MASS` library).  This dataset contains records for 2287 students in the Netherlands and has the following dimensions:
+
+* `lang`: their test score on a language exam  
+* `IQ`: their verbal IQ  
+* `class`: the ID number for their classroom  
+* `GS`: the number of students in each class  
+* `SES`: the socio-economic status of their family  
+* `COMB`: was the student in a multi-grade class? (0=no, 1=yes)  
+
+In particular, this assignment focused on three main questions regarding the dataset:
+
+1. Are there discrepancies in `IQ` or `SES` in the different classes, or when grouping by multi-grade vs non-multi-grade classes?  
+2. When did students perform better or worse on the language exam? Describe which variables had the most important effects. 
+3. Do you think there are interactions in the effects of the variables on the language exam score? Speculate as to the cause of any such effects that you think should be included.  
+
+### Initial Data Exploration
+
+Of particular importance to this assignment is the data under the dimension `lang`, which represents the scores of the students on the language exam.  As shown by the plot below, these scores seemed to range between 10 and 58.  The median score was 42, the Interquartile Range seemed to be 48 - 35 = 13, and the distribution appears slightly skewed with the mean of 41 slightly below the median of 42.  
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# quantile plotting - language score
+q1 <- ggplot(data=nlschools, mapping=aes(sample=lang)) + stat_qq(dist = qunif, size = 1) + labs(title='Quantile Plot of Language Score', x = 'Quantile', y = 'Language Score')
+plot(q1)
+```
+
+When viewed on a QQ plot against a normal distribution, the language scores seem to fit the normal assumption for low and mid-range scores; however, the distribution appears to deviate from the normal assumption at the higher end, likely due to the fact the test had a capped maximum score.  
+
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+
+# mutate dataframe for useful columns
+nlschools.mut <- mutate(nlschools, log.SES = log(SES),
+                        std.lang = (lang - mean(lang)) / sd(lang),
+                        std.IQ = (IQ - mean(IQ)) / sd(IQ),
+                        std.SES = (SES - mean(SES)) / sd(SES),
+                        std.log.SES = (log.SES - mean(log.SES)) / sd(log.SES))
+
+# QQ plot of standardized language score versus normal distribution
+q2 <- ggplot(data=nlschools.mut, mapping=aes(sample = std.lang)) + stat_qq(dist='qnorm') + geom_abline() + labs(title='QQ plot, Language Scores (Standardized) \n vs Normal Distribution', x = 'Normal Quantiles', y = 'Language Score Quantiles')
+plot(q2)
+```
+
+Two important predictor variables which will be used in this analysis are `IQ`, the students' verbal IQ score, and `SES`, a measure of the students' socioeconomic conditions (higher score = more affluent).  As shown by the QQ plots below, the verbal IQ score seems to behave well against a normal distribution; however, the SES measure has a different, more nuanced behavior.  Given these scores also seem capped at the low and high ends, a distribution QQ plot does not behave as we would expect at the tails.  In the middle range, however, it does appear the distribution of SES scores most closely resembles a log-normal distribution, which is intuitive given the distribution of wealth in many countries is highly skewed.    
+
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# QQ plot of standardized Verbal IQ versus normal distribution
+q3 <- ggplot(data=nlschools.mut, mapping=aes(sample = std.IQ)) + stat_qq(dist='qnorm') + geom_abline() + labs(title='QQ plot, Verbal IQ (Standardized) \n vs Normal Distribution', x = 'Normal Quantiles', y = 'IQ Quantiles')
+plot(q3)
+
+# QQ plot of standardized log(SES) versus normal distribution
+q4 <- ggplot(data=nlschools.mut, mapping=aes(sample = std.log.SES)) + stat_qq(dist='qnorm') + geom_abline() + labs(title='QQ plot, Log(Socioeconomic Class) (Standardized) \n vs Normal Distribution', x = 'Normal Quantiles', y = 'Socioeconomic Quantiles')
+plot(q4)
+```
+
+A final predictor variable of lesser importance is `GS`, or number of students in each of the 113 classes numbered in `class`.  This variable had a range of 10 to 40 students with the median around 27 students.  As evidenced by the QQ plot below, while the average number of students in single-grade and multi-grade classes did not vary widely, there are some discrepencies in the relative quantiles between the subsets, namely there seem to be more students in single-grade classes at lower quantiles and fewer students in single-grade classes at higher quantiles.
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# qq plotting: students per class
+# find category with minimum number of datapoints and use that to form quantiles
+n.pts = with(nlschools, min( length(GS[ COMB == 1 ]), length(GS[ COMB == 0])))
+probs = seq(from = 0, to = 1, length.out = n.pts)
+q1 = with(nlschools, quantile( GS[ COMB == 1], probs = probs))
+q2 = with(nlschools, quantile( GS[ COMB == 0], probs = probs))
+
+# initialize ggplot using quantile vectors
+q5 <- ggplot(mapping = aes(x=q1, y=q2)) + geom_point(size = 1) + geom_abline(a=0, b=1) + labs(x = 'COMB == 1', y ='COMB == 0', title = 'QQ plot, GS Grouped By COMB (0=N, 1=Y)')
+plot(q5)
+```
+
+## Analysis
+### Part 1: Distribution of IQ and SES Among Classes
+The first part of the assignment explores the relationship of `IQ` and `SES` among the 133 different classes in the dataset.  To check to see if the classes have a relatively consistent distribution of `IQ` and `SES`, I first ranked all of the 133 classes by their average `IQ` and `SES` scores.  I then took 8 subsets of the 133 classes, with the first subset representing the 17 classes with the highest averages, the second subset representing the 17 classes with the second highest averages, and so forth.  Finally, I created quantile plots for each class subset against the pooled quantile plot for all of the classes.  
+
+As evidenced by the faceted charts below, the distribution of both `IQ` and `SES` is not uniform across the classes; in fact, there is a relatively wide disparity between the classes with the highest `IQ`/`SES` scores and the classes with the lowest `IQ`/`SES` scores.  Also, it seems the disparity among classes is more pronounced in the distribution of `SES` scores versus `IQ` scores, a result which makes sense given the distribution of such scores appears log-normal for much of its range.
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# rank class by average IQ
+nlschools.class <- ddply(nlschools, "class", summarize, avg.IQ = mean(IQ))
+nlschools.class <- nlschools.class[order(-nlschools.class$avg.IQ),]
+nlschools.class$ID.IQ <- seq.int(nrow(nlschools.class))
+nlschools.class <- nlschools.class[c('class', 'ID.IQ')]
+nlschools.class.merge <- merge(x=nlschools,y=nlschools.class,by="class",all.x=TRUE)
+
+# rank class by average SES
+nlschools.class <- ddply(nlschools, "class", summarize, avg.SES = mean(SES))
+nlschools.class <- nlschools.class[order(-nlschools.class$avg.SES),]
+nlschools.class$ID.SES <- seq.int(nrow(nlschools.class))
+nlschools.class <- nlschools.class[c('class', 'ID.SES')]
+nlschools.class.merge2 <- merge(x=nlschools.class.merge,y=nlschools.class,by="class",all.x=TRUE)
+
+# quantile plot of average IQ by class rank
+nlschools.class.merge2$IQ.cat <- with(nlschools.class.merge2, cut(ID.IQ, breaks = 8))
+IQ.only = subset(nlschools.class.merge2, select = 'IQ')
+q6 <- ggplot(data=nlschools.class.merge2, mapping=aes(sample=IQ)) + stat_qq(dist = qunif, size = 1) + facet_wrap("IQ.cat", nrow = 2) + stat_qq(data = IQ.only, dist = qunif, geom = 'line', color = 'blue') + labs(title='Quantile Plots, IQ By Class Rank Vs Pooled [Blue]', x = 'Quantile', y = 'IQ')
+plot(q6)
+
+# quantile plot of average SES by class rank
+nlschools.class.merge2$SES.cat <- with(nlschools.class.merge2, cut(ID.SES, breaks = 8))
+SES.only = subset(nlschools.class.merge2, select = 'SES')
+q7 <- ggplot(data=nlschools.class.merge2, mapping=aes(sample=SES)) + stat_qq(dist = qunif, size = 1) + facet_wrap("SES.cat", nrow = 2) + stat_qq(data = SES.only, dist = qunif, geom = 'line', color = 'blue') + labs(title='Quantile Plots, SES By Class Rank Vs Pooled [Blue]', x = 'Quantile', y = 'SES')
+plot(q7)
+```
+
+Still of interest with respect to the distribution of `IQ` and `SES` scores among classes is whether or not there is a pronounced difference among multi-grade classes (`COMB` = 1) or single-grade classes (`COMB` = 0).  To answer this question, I created quantile-quantile plots for the subsets of `COMB` = 1 or `COMB` = 0 for both `IQ` and `SES` scores and plotted these subsets against the  y = x reference line.  If all the points lie along the y = x reference line, the distribution among the subsets is consistent.  However, as evidenced for both `IQ` and `SES`, the points in the QQ plot lie primarily above the y = x reference line, implying that the `IQ` and `SES` scores for the single-grade classes was uniformly better across all quantiles.  This effect is not very pronounced, as the points do not lie a far distance from the reference line, but it does appear to be present in the data.  
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# quantile-quantile plot ("qq plot") of IQ and SES faceted by COMB
+# find category with minimum number of datapoints and use that to form quantiles
+n.pts = with(nlschools, min( length(IQ[ COMB == 1 ]), length(IQ[ COMB == 0])))
+probs = seq(from = 0, to = 1, length.out = n.pts)
+q1 = with(nlschools, quantile( IQ[ COMB == 1], probs = probs))
+q2 = with(nlschools, quantile( IQ[ COMB == 0], probs = probs))
+
+# initialize ggplot using quantile vectors
+q8 <- ggplot(mapping = aes(x=q1, y=q2)) + geom_point(size = 1) + geom_abline(a=0, b=1) + labs(x = 'COMB == 1', y ='COMB == 0', title = 'QQ plot, IQ Grouped By COMB (0=N, 1=Y)')
+plot(q8)
+
+# find category with minimum number of datapoints and use that to form quantiles
+n.pts = with(nlschools, min( length(SES[ COMB == 1 ]), length(SES[ COMB == 0])))
+probs = seq(from = 0, to = 1, length.out = n.pts)
+q1 = with(nlschools, quantile( SES[ COMB == 1], probs = probs))
+q2 = with(nlschools, quantile( SES[ COMB == 0], probs = probs))
+
+# initialize ggplot using quantile vectors
+q9 <- ggplot(mapping = aes(x=q1, y=q2)) + geom_point(size = 1) + geom_abline(a=0, b=1) + labs(x = 'COMB == 1', y ='COMB == 0', title = 'QQ plot, SES Grouped By COMB (0=N, 1=Y)')
+plot(q9)
+```
+
+As an addendum, one other interesting relationship to explore is the correlation between the rank of the class for verbal `IQ` versus the rank of the class for `SES` score.  A highly correlated rank-rank plot would imply that classes with higher average `IQ` also tended to be wealthier and vice versa.  As evidenced by the data, there is a noticeable positive linear trend between the predictor variables; however, the rank-rank correlation coefficient of 0.42 implies a modest trend at best.  Thus, it is not apparent that a particular class' ranked average `IQ` is a strong predictor of its ranked average `SES`.    
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# plot rank-rank correlation
+p1 <- ggplot(nlschools.class.merge2, aes(x = ID.SES, y = ID.IQ)) + geom_point() + geom_smooth(method='lm') + labs(title = "Rank-Rank Plot Of Class By SES And IQ", x = "SES", y = "IQ")
+plot(p1)
+coeff1 <- with(nlschools.class.merge2,cor(ID.SES,ID.IQ))
+```
+
+Correlation Coefficient (rank `SES` vs rank `IQ`): `r coeff1`
+
+### Part 2: Impact of Predictor Variables on Language Exam Score
+#### Linear Model
+To explore the impact of predictor variables on language exam score, I first started with the assumption of a multivariate linear model.  For purposes of this analysis, I removed the class variable, as a linear relationship between the language exam score and class does not make sense for this type of analysis (i.e., the score of the language exam depended on the students in the class and not the actual class number).  As shown below, I first defined the full model to include all of the potential predictive variables and subsequently used backward stepwise regression to remove variables which did not materially improve the model's overall AIC score.  
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# remove class factor
+nlschools.noclass <- nlschools[c('lang', 'IQ', 'GS', 'SES', 'COMB')]
+
+# generate full linear model
+full.model <- lm(lang ~ ., data = nlschools.noclass)
+back.step <- step(full.model)
+print(back.step$coefficients)
+```
+
+The result of the linear model indicated the significant predictor variables of the students' language exam scores included their verbal `IQ`, `SES` score, and whether or not the class was single-grade or multi-grade (`COMB` factor variable).  Based on this analysis, both `IQ` and `SES` seemed to have positive linear effects on the language exam score, while the `COMB` factor variable had a negative adjustment of -1.68 to the language score for multi-grade classes versus single-grade classes.  
+
+I then visually inspected the linear fit models for each of the variables independently against the underlying data for both the `IQ` and `SES` predictor variables.  There does seem to be a positive trend between both `IQ` and `SES` and the language exam score.  Additionally, as shown by the boxplot of `COMB` = 0 versus `COMB` = 1, the multi-grade classes do have a lower overall median, mean, and interquartile range than the single-grade classes.  
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# exploratory plotting - IQ versus language score
+p2 <- ggplot(nlschools, aes(x = IQ, y = lang)) + geom_point() + geom_smooth(method='lm') + labs(title = "Language Test Score Versus Verbal IQ", x = "Verbal IQ", y = "Language Test Score")
+plot(p2)
+coeff2 <- with(nlschools,cor(IQ,lang)) 
+```
+
+Correlation Coefficient (`IQ` vs `lang`): `r coeff2`  
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# exploratory plotting - SES versus language score
+p3 <- ggplot(nlschools, aes(x = SES, y = lang)) + geom_point() + geom_smooth(method='lm') + labs(title = "Language Test Score Versus Socioeconomic Class", x = "Socioeconomic Class", y = "Language Test Score")
+plot(p3)
+coeff3 <- with(nlschools,cor(SES,lang)) 
+```
+
+Correlation Coefficient (`SES` vs `lang`): `r coeff3`  
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# exploratory plotting - boxplot of language score versus combined class factor variable
+boxplot(lang~COMB,data=nlschools, main="Language Test Score Versus Combined Class Factor Variable", xlab="Combined Class (0 = no, 1 = yes)", ylab="Language Test Score")
+```
+
+With respect to `GS`, a simple scatterplot versus language test score does not seem to reveal any statistically significant predictive relationship, a result which seems to substantiate removing it from the linear model.
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# exploratory plotting - class size versus language score
+p4 <- ggplot(nlschools, aes(x = GS, y = lang)) + geom_point() + geom_smooth(method='lm') + labs(title = "Language Test Score Versus Class Size", x = "Class Size", y = "Language Test Score")
+plot(p4)
+```
+
+The linear models were informative in that they helped remove the `GS` variable (number of students in each class) from the list of significant predictors of language score and helped to illustrate the overall positive or negative trend for each potential predictor against the language score.  
+
+However, based on the plots, it is not immediately clear that the linear models are the best-fit models for the `IQ` and `SES` predictors.  Thus, I also tested non-linear models against these variables to see if the fit improves.  It is also not immediately apparent if the model should be expanded to include potential interactions among the variables. Two examples of such potential interactions are shown below.  The first scatterplot (`SES` versus `IQ`) indicates a positive trend between the two variables, where higher `SES` generally corresponds to higher `IQ`.  The second scatterplot (`GS` versus `SES`) indicates that higher `SES` generally corresponds to a reduced variance in `GS`.  There is also the potential impact of either/both of `IQ` and/or `SES` on the impact of `COMB` with respect to language score.
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# exploratory plotting - SES versus IQ
+p5 <- ggplot(nlschools, aes(x = SES, y = IQ)) + geom_point() + geom_smooth(method='lm') + labs(title = "Verbal IQ Score Versus Socioeconomic Score", x = "SES", y = "Verbal IQ")
+plot(p5)
+# exploratory plotting - SES versus GS
+p6 <- ggplot(nlschools, aes(x = SES, y = GS)) + geom_point() + geom_smooth(method='lm') + labs(title = "Class Size Versus Socioeconomic Score", x = "SES", y = "GS")
+plot(p6)
+```
+
+#### Non-Linear Models
+Of the predictor variables generated from the linear model, only `IQ` and `SES` can be fit utilizing a spline model (`COMB` is not a continuous predictor, rather a factor variable).  Thus, I first pieced apart the predictors and generated lists of potential linear and nonlinear terms which would be used in the nonlinear predictor model of language score.  I then utilized the generalized additive model ("GAM") package in R to test the terms' AIC to determine if nonlinear terms should be included in the final model.    
+
+For `IQ`, the GAM produced a linear term as the final output, thereby validating the linear assumption generated in the first part of this exercise.    
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# explore nonlinear relationship of IQ versus language score
+scope.list = list(
+  "IQ" = ~1 + IQ + ns(IQ, df=2) + ns(IQ, df=3) + ns(IQ, df=4)
+  )
+start.model = gam(lang ~ 1, data = nlschools)
+# the step.gam function
+spline.step = step.gam(start.model, scope = scope.list)
+```
+
+For `SES`, the GAM produced a spline with 3 degrees of freedom, emphasizing the nonlinearity of the relationship between language score and `SES` score.  I then plotted a spline model relative to the underlying data to check if the model does in fact follow the distribution.  As evidenced by the plot below, a spline model with 3 degrees of freedom does seem to fit the `SES` data trend well.  
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# explore nonlinear relationship of SES versus language score
+scope.list2 = list(
+  "SES" = ~1 + SES + ns(SES, df=2) + ns(SES, df=3) + ns(SES, df=4)
+  )
+start.model2 = gam(lang ~ 1, data = nlschools)
+spline.step2 = step.gam(start.model2, scope = scope.list2)
+
+# plot natural spline model based on stepwise regression
+p7 <- ggplot(nlschools, aes(x = SES, y = lang)) + geom_point() + labs(title = "Plot of Language Score Vs SES", x = "SES", y = "Language Score") + geom_smooth(method = 'lm', formula = y~ns(x, df=3))
+plot(p7)
+```
+
+### Part 3: Interactions of Predictor Variables
+#### Tracking Interactions Using Coplots
+The final part of the exercise involved tracking the potential interactions between predictor variables and whether or not such interactions should be considered when modeling language exam scores.  For purposes of this project, I focused on interactions among the three predictor variables outlined in Part 2: `IQ`, `SES`, and `COMB`.  For each of the predictor variables, I created coplots against the language score faceted by one of the other predictor variables (e.g., `SES` versus `lang` for each subset of `IQ`).  The results of this analysis yielded some interesting behaviors.  Based on the coplots, it seems that the impact of `SES` on language scores diminished as `IQ` increased, while the impact of `IQ` on language scores seemed to remain about the same across all `SES` scores.  Additionally, being in a multi-grade class seemed to create less of a disparity to being in a single-grade class for higher `IQ` and `SES` scores.
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align='center'}
+# coplot of language versus SES faceted by IQ
+coplot( lang ~ SES | IQ, data = nlschools, panel=panel.smooth, rows = 1, cex=1, n=6)
+# coplot of language versus IQ faceted by SES
+coplot( lang ~ IQ | SES, data = nlschools, panel=panel.smooth, rows = 1, cex=1, n=6)
+# coplot of language versus COMB faceted by IQ
+coplot( lang ~ COMB | IQ, data = nlschools, panel=panel.smooth, rows = 1, cex=1, n=6)
+# coplot of language versus COMB faceted by SES
+coplot( lang ~ COMB | SES, data = nlschools, panel=panel.smooth, rows = 1, cex=1, n=6)
+```
+
+#### Adding Interaction Terms To  Model
+The final part of the project was to utilize the non-linear GAM model derived previously and incorporate potential interaction terms among the predictor variables to create a "finalized" GAM.  To accomplish this task, I utilized the step() function to create a GAM utilizing a forward stepwise regression model beginning with the non-linear model and subsequently incorporating significant interaction terms between the predictors.  As shown below, the step() function determined that the model should be enhanced with the interaction between `IQ` and `COMB`.  This interaction makes sense given the coplot results - at higher `IQ`, the disparity between language score for single-grade and multi-grade classes seems to lessen.
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align="center"}
+# start with the linear model of IQ and COMB and the spline of df=3 for SES
+start.model = lm(lang ~ IQ + COMB + ns(SES, df=3), data = nlschools.noclass)
+# the full model is the GAM plus all linear interactions
+all.interactions = lm(lang ~ .^2 + ns(SES, df=3), data = nlschools.noclass)
+# do forward variable selection
+interactions.gam.step = step(start.model, direction='forward', scope = formula(all.interactions))
+formula(interactions.gam.step)
+```
+
+Incorporating the non-linear component with respect to the `SES` predictor helped eliminate interaction terms which would ordinarily have been incorporated utilizing a backward stepwise multivariate regression model.  Also, interestingly, when the model is allowed to include interaction terms among all predictors, `GS` becomes a significant predictor of language score.
+
+```{r fig.width=15, fig.height=6, dpi=70, echo=FALSE, fig.align="center"}
+# compare to linear model with interactions allowed
+full.model <- lm(lang ~ .^2, data = nlschools.noclass)
+back.step <- step(full.model, trace=0)
+print(back.step$coefficients)
+```
+
+## Conclusion
+In conclusion, based on the approaches described above, I was able to parse the nlschools data available via the R `MASS` library to find interesting relationships among various attributes related to school children in the Netherlands.  In particular, I was able to determine that average verbal IQ and socioeconomic data among classes is skewed and that multi-grade classes tended to have uniformly lower verbal IQ and socioeconomic scores versus single-grade classes.  With respect to predicting the children's performance on a language test, the most significant predictors of score included `IQ`, which had a positive linear effect, `SES`, which had a positive non-linear effect, and `COMB`, which in a best-fit model should also be viewed in the context of `IQ` (at higher `IQ`, the disparity between `COMB`=0 and `COMB`=1 tended to diminish).
